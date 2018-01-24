@@ -1,0 +1,1034 @@
+{
+"AWSTemplateFormatVersion": "2010-09-09",
+"Description": "AWS Firewall Integration Demo - Automated Threat Detection and Response",
+
+"Parameters": {
+    "BootstrapBucketName":{
+        "Description": "Bucket name for FW bootstrap configuration",
+        "Type": "String"
+    },
+    "LambdaBucketName":{
+        "Description": "Bucket name for FW bootstrap configuration",
+        "Type": "String"
+    },
+    "ServerKeyName": {
+      "Description": "Name of an existing EC2 KeyPair to enable SSH access to the FW (Hint: You MUST have its private key)",
+      "Type": "AWS::EC2::KeyPair::KeyName"
+    },
+    "NumberOfAZs": {
+        "Description" : "Total Number of AZs which will be used in this deployment (Default 2)",
+        "Type" : "Number",
+        "MinValue" : "2",
+        "Default" : "2",
+        "MaxValue" : "2"
+    },
+    "ELBName": {
+      "Type" : "String",
+      "Description": "Enter the name of the External Classic Load Balancer",
+      "Default": "public-elb",
+      "MinLength" : "3",
+      "MaxLength" : "12"
+    },
+    "VpcAzs": {
+      "Type": "List<AWS::EC2::AvailabilityZone::Name>",
+      "Description": "Enter the list of Availability Zones (Based on Number of AZs above)"
+    },
+    
+    "CertificateARN":{
+        "Type": "String",
+        "Description": "Enter arn for the certificate"
+    }
+},
+
+"Mappings": {
+    "PANFWRegionMap" : {
+      "us-east-1"      :  { "AMI": "ami-7dcb9906"},
+      "us-east-2"      :  { "AMI": "ami-f1200094"},
+      "us-west-1"      :  { "AMI": "ami-0f88a16f"},
+      "us-west-2"      :  { "AMI": "ami-d28992ab"},  
+      "sa-east-1"      :  { "AMI": "ami-15651279"},
+      "eu-west-1"      :  { "AMI": "ami-86d63eff"},
+      "eu-west-2"      :  { "AMI": "ami-3c170658"},
+      "eu-central-1"   :  { "AMI": "ami-6df35f02"},
+      "ca-central-1"   :  { "AMI": "ami-0f08b76b"},
+      "ap-northeast-1" :  { "AMI": "ami-ab04e7cd"},
+      "ap-northeast-2" :  { "AMI": "ami-6cbd6402"},
+      "ap-southeast-1" :  { "AMI": "ami-17a41074"},
+      "ap-southeast-2" :  { "AMI": "ami-8ed3cced"},
+      "ap-south-1"     :  { "AMI": "ami-1ffc8470"}
+    },
+
+    "UbuntuRegionMap" : {
+        "us-west-2"      :  { "AMI": "ami-efd0428f" },
+        "ap-northeast-1" :  { "AMI": "ami-afb09dc8" },
+        "us-west-1"      :  { "AMI": "ami-2afbde4a" },
+        "ap-northeast-2" :  { "AMI": "ami-66e33108" },
+        "ap-southeast-1" :  { "AMI": "ami-8fcc75ec" },
+        "ap-southeast-2" :  { "AMI": "ami-96666ff5" },
+        "eu-central-1"   :  { "AMI": "ami-060cde69" },
+        "eu-west-1"      :  { "AMI": "ami-a8d2d7ce" },
+        "eu-west-2"      :  { "AMI": "ami-f1d7c395" },
+        "sa-east-1"      :  { "AMI": "ami-4090f22c" },
+        "us-east-1"      :  { "AMI": "ami-80861296" },
+        "us-east-2"      :  { "AMI": "ami-618fab04" },
+        "ca-central-1"   :  { "AMI": "ami-b3d965d7" },
+        "ap-south-1"     :  { "AMI": "ami-c2ee9dad" }
+    }
+},
+"Resources": {
+    "LambdaExecutionRole" : {
+        "Type": "AWS::IAM::Role",
+        "Properties": {
+            "AssumeRolePolicyDocument": {
+               "Version": "2012-10-17",
+               "Statement": [ {
+                 "Effect": "Allow",
+                 "Principal": {
+                 "Service": "lambda.amazonaws.com"
+                },
+               "Action": "sts:AssumeRole"
+              } ]
+            },
+            "Path":"/",
+            "Policies": [ {
+              "PolicyName": "LambdaExecutionRolePolicy",
+              "PolicyDocument":{
+                "Version": "2012-10-17",
+                "Statement": [
+                {
+                    "Effect": "Allow",
+                    "Resource": "*",
+                    "Action":
+                    [
+                        "ec2:*"
+                    ]
+                },
+                {
+                    "Resource": "arn:aws:logs:*:*:*",
+                    "Effect": "Allow",
+                    "Action":
+                    [
+                        "logs:CreateLogGroup",
+                        "logs:CreateLogStream",
+                        "logs:PutLogEvents"
+                    ]
+                },
+                {
+                    "Resource": "*",
+                    "Effect": "Allow",
+                    "Action":
+                    [
+                        "events:*"
+                    ]
+                },
+                {
+                    "Resource": "*",
+                    "Effect": "Allow",
+                    "Action":
+                    [
+                        "lambda:*"
+                    ]
+                },
+                {
+                    "Resource": "*",
+                    "Effect": "Allow",
+                    "Action":
+                    [
+                        "iam:*"
+                    ]
+                },
+                {
+                    "Resource": "*",
+                    "Effect": "Allow",
+                    "Action":
+                    [
+                        "s3:*"
+                    ]
+                },
+                {
+                    "Resource": "*",
+                    "Effect": "Allow",
+                    "Action":
+                    [
+                        "dynamodb:*"
+                    ]
+                },
+                {
+                    "Resource": "*",
+                    "Effect": "Allow",
+                    "Action":
+                    [
+                        "cloudwatch:PutMetricData"
+                    ]
+                }]
+            }
+        } ]
+      }
+    },
+    "PushToUserID" : {
+        "Type": "AWS::Lambda::Function",
+        "Properties": {
+            "Handler": "httpinput.lambda_handler",
+            "Role": { "Fn::GetAtt" : ["LambdaExecutionRole", "Arn"] },
+            "Environment":{ "Variables": 
+            {"fwMgtIp": {"Ref": "ManagementElasticIP"},
+            "dbTable": {"Ref": "dynamodbxff"}}
+            },
+            "Code": {
+                "S3Bucket": {"Ref": "LambdaBucketName"},
+                "S3Key": "config_xff.zip"
+            },
+        "Runtime": "python2.7",
+        "Timeout": "200"
+        },
+        "DependsOn": [ "ManagementElasticIP","dynamodbxff" ]
+    },
+
+    "PushToUserIDRule": {
+        "Type": "AWS::Events::Rule",
+        "Properties": {
+            "Description": "ScheduledRule",
+            "ScheduleExpression": "rate(2 minutes)",
+            "State": "ENABLED",
+            "Targets": [{
+            "Arn": { "Fn::GetAtt": ["PushToUserID", "Arn"] },
+            "Id": "PushtoUserIDLambda"
+            }]
+        }
+    },
+    "PermissionForEventsToInvokeLambda": {
+        "Type": "AWS::Lambda::Permission",
+        "Properties": {
+            "FunctionName": { "Ref": "PushToUserID" },
+            "Action": "lambda:InvokeFunction",
+            "Principal": "events.amazonaws.com",
+            "SourceArn": { "Fn::GetAtt": ["PushToUserIDRule", "Arn"] }
+            }
+    },
+
+    "GetXFFHeaderLambda" : {
+        "Type": "AWS::Lambda::Function",
+        "Properties": {
+            "Handler": "extract_xff.extract_xff_lambda_handler",
+            "Role": { "Fn::GetAtt" : ["LambdaExecutionRole", "Arn"] },
+            "Environment":{ "Variables": 
+                {
+                  "fwMgtIp": {"Ref": "ManagementElasticIP"},
+                  "dbTable": {"Ref": "dynamodbxff"}
+                }
+            },
+            "Code": {
+                "S3Bucket": {"Ref": "LambdaBucketName"},
+                "S3Key": "config_xff.zip"
+            },
+        "Runtime": "python2.7",
+        "Timeout": "300"
+        },
+        "DependsOn": [ "ManagementElasticIP","dynamodbxff" ]
+    },
+    "BootstrapRole": {
+        "Type": "AWS::IAM::Role",
+        "Properties": {
+            "AssumeRolePolicyDocument": {
+                "Version": "2012-10-17",
+                "Statement": [ {
+                    "Effect": "Allow",
+                    "Principal": {
+                        "Service": "ec2.amazonaws.com"
+                    },
+                "Action": "sts:AssumeRole"
+                } ]
+            },
+            "Path":"/",
+            "Policies": [ {
+                "PolicyName" : "BootstrapRolePolicy",
+                "PolicyDocument": {
+                    "Version" : "2012-10-17",
+                    "Statement": [{
+                        "Effect": "Allow",
+                        "Action": "s3:ListBucket",
+                         "Resource": { "Fn::Join" : ["", [ "arn:aws:s3:::", { "Ref" : "BootstrapBucketName" }]]}
+                    },
+                    {
+                        "Effect": "Allow",
+                        "Action": "s3:GetObject",
+                         "Resource": { "Fn::Join" : ["", [ "arn:aws:s3:::", { "Ref" : "BootstrapBucketName" } , "/*" ]]}
+                    }]
+                }
+            }]
+        }
+    },
+    "BootstrapInstanceProfile":{
+        "Type": "AWS::IAM::InstanceProfile",
+        "Properties": {
+          "Path": "/",
+          "Roles": [ {
+              "Ref": "BootstrapRole"
+            }]
+        }
+    },
+
+    "XFFDemoVPC": {
+      "Type": "AWS::EC2::VPC",
+      "Properties": {
+        "CidrBlock": "10.0.0.0/16",
+        "InstanceTenancy": "default",
+        "EnableDnsSupport": "true",
+        "EnableDnsHostnames": "true",
+        "Tags": [{ "Key": "Name", "Value": "XFF Userid CFT" }]
+      }
+    },
+
+    "PublicElasticIP": {
+       "Type" : "AWS::EC2::EIP",
+       "Properties" : {
+          "Domain" : "vpc"
+       },
+       "DependsOn": [ "XFFDemoVPC" ]
+    },
+
+    "ManagementElasticIP": {
+       "Type" : "AWS::EC2::EIP",
+       "Properties" : {
+          "Domain" : "vpc"
+       },
+       "DependsOn": [ "XFFDemoVPC" ]
+    },
+
+    "XFFDemoDBSubnetA": {
+      "Type": "AWS::EC2::Subnet",
+      "Properties": {
+        "CidrBlock": "10.0.2.0/24",
+        "VpcId": {"Ref": "XFFDemoVPC"},
+        "AvailabilityZone": { "Fn::Select" : [ "0", {"Ref" : "VpcAzs"} ] },
+        "Tags": [{ "Key": "Name", "Value": "XFF Userid CFT" }]
+      },
+      "DependsOn": "XFFDemoVPC"
+    },
+
+    "XFFDemoPublicSubnet": {
+      "Type": "AWS::EC2::Subnet",
+      "Properties": {
+        "CidrBlock": "10.0.0.0/24",
+        "VpcId": {"Ref": "XFFDemoVPC"},
+        "AvailabilityZone": { "Fn::GetAtt" : [ "XFFDemoDBSubnetA", "AvailabilityZone" ] },
+        "Tags": [{ "Key": "Name", "Value": "XFF Userid CFT" }]
+      },
+      "DependsOn": [ "XFFDemoVPC", "XFFDemoDBSubnetA" ]
+    },
+
+    "XFFDemoWebSubnetA": {
+      "Type": "AWS::EC2::Subnet",
+      "Properties": {
+        "CidrBlock": "10.0.1.0/24",
+        "AvailabilityZone": { "Fn::GetAtt" : [ "XFFDemoDBSubnetA", "AvailabilityZone" ] },
+        "VpcId": {"Ref": "XFFDemoVPC"},
+        "Tags": [{ "Key": "Name", "Value": "XFF Userid CFT" }]
+      },
+      "DependsOn":[ "XFFDemoVPC", "XFFDemoDBSubnetA" ]
+    },
+    "XFFDemoWebSubnetB": {
+      "Type": "AWS::EC2::Subnet",
+      "Properties": {
+        "CidrBlock": "10.0.5.0/24",
+        "AvailabilityZone": { "Fn::Select" : [ "1", {"Ref" : "VpcAzs"} ] },
+        "VpcId": {"Ref": "XFFDemoVPC"},
+        "Tags": [{ "Key": "Name", "Value": "XFF Userid CFT" }]
+      },
+      "DependsOn":[ "XFFDemoVPC", "XFFDemoDBSubnetA" ]
+    },
+    "InternetGW": {
+      "Type": "AWS::EC2::InternetGateway",
+      "Properties": {
+        "Tags": [{ "Key": "Name", "Value": "XFF Userid CFT" }]
+      }
+      
+    },
+
+    "dopt21c7d043": {
+      "Type": "AWS::EC2::DHCPOptions",
+      "Properties": {
+        "DomainName": "us-west-2.compute.internal",
+        "DomainNameServers": [
+          "AmazonProvidedDNS"
+        ]
+      }
+    },
+
+    "WebSvrACL": {
+      "Type": "AWS::EC2::NetworkAcl",
+      "Properties": {
+        "VpcId": {"Ref": "XFFDemoVPC"}
+      },
+      "DependsOn":[ "XFFDemoVPC"]
+    },
+
+    "rtbdefroute": {
+      "Type": "AWS::EC2::RouteTable",
+      "Properties": {
+        "VpcId": {"Ref": "XFFDemoVPC"}
+      },
+      "DependsOn":[ "XFFDemoVPC"]
+    },
+
+    "rtbdefpubsub": {
+      "Type": "AWS::EC2::RouteTable",
+      "Properties": {
+        "VpcId": {"Ref": "XFFDemoVPC"}
+      },
+      "DependsOn":[ "XFFDemoVPC"]
+    },
+
+    "FWManagementNetworkInterface": {
+      "Type": "AWS::EC2::NetworkInterface",
+      "Properties": {
+        "Description": "AWS FW1 MGMT",
+        "SubnetId": {"Ref": "XFFDemoPublicSubnet"},
+        "SourceDestCheck": "false",
+        "PrivateIpAddresses": [
+          {
+            "PrivateIpAddress": "10.0.0.99",
+            "Primary": "true"
+          }
+        ],
+        "GroupSet": [{"Ref": "sgWideOpen"}],
+        "Tags": [{"Key": "Name","Value": "WP AWS FW1 MGMT"}]
+      },
+      "DependsOn": [ "sgWideOpen","XFFDemoPublicSubnet" ]
+    },
+
+    "FWPublicNetworkInterface": {
+      "Type": "AWS::EC2::NetworkInterface",
+      "Properties": {
+        "Description": "AWS FW1 E1/1",
+        "SubnetId": {"Ref": "XFFDemoPublicSubnet"},
+        "SourceDestCheck": "false",
+        "PrivateIpAddresses": [
+          {
+            "PrivateIpAddress": "10.0.0.100",
+            "Primary": "true"
+          }
+        ],
+        "GroupSet": [{"Ref": "sgWideOpen"}],
+        "Tags": [{"Key": "Name","Value": "WP AWS FW1 E1/1"}]
+      },
+      "DependsOn": [ "sgWideOpen", "XFFDemoPublicSubnet" ]
+    },
+
+    "FWPrivate12NetworkInterface": {
+      "Type": "AWS::EC2::NetworkInterface",
+      "Properties": {
+        "Description": "AWS FW1 E1/2",
+        "SubnetId": {"Ref": "XFFDemoWebSubnetA"},
+        "SourceDestCheck": "false",
+        "PrivateIpAddresses": [
+          {
+            "PrivateIpAddress": "10.0.1.11",
+            "Primary": "true"
+          }
+        ],
+        "GroupSet": [{"Ref": "sgWideOpen"}],
+        "Tags": [{"Key": "Name","Value": "WP AWS FW1 E1/2"}]
+      },
+      "DependsOn": [ "sgWideOpen", "XFFDemoWebSubnetA" ]
+    },
+
+    "FWPrivate13NetworkInterface": {
+      "Type": "AWS::EC2::NetworkInterface",
+      "Properties": {
+        "Description": "AWS FW1 E1/3",
+        "SubnetId": {"Ref": "XFFDemoDBSubnetA"},
+        "SourceDestCheck": "false",
+        "PrivateIpAddresses": [
+          {
+            "PrivateIpAddress": "10.0.2.11",
+            "Primary": "true"
+          }
+        ],
+        "GroupSet": [{"Ref": "sgWideOpen"}],
+        "Tags": [{"Key": "Name", "Value": "WP AWS FW1 E1/3"}]
+      },
+      "DependsOn": [ "sgWideOpen", "XFFDemoDBSubnetA" ]
+    },
+
+    "FWEIPMAnagementAssociation": {
+       "Type": "AWS::EC2::EIPAssociation",
+       "Properties": {
+          "AllocationId": { "Fn::GetAtt": [ "ManagementElasticIP", "AllocationId" ] },
+          "NetworkInterfaceId": { "Ref": "FWManagementNetworkInterface" }
+       },
+       "DependsOn": [ "FWManagementNetworkInterface", "ManagementElasticIP" ]
+    },
+
+    "FWEIPPublicAssociation": {
+       "Type": "AWS::EC2::EIPAssociation",
+       "Properties": {
+          "AllocationId": { "Fn::GetAtt": [ "PublicElasticIP", "AllocationId" ] },
+          "NetworkInterfaceId": { "Ref": "FWPublicNetworkInterface" }
+       },
+       "DependsOn": [ "FWPublicNetworkInterface", "PublicElasticIP" ]
+    },
+
+    "sgWideOpen": {
+      "Type": "AWS::EC2::SecurityGroup",
+      "Properties": {
+        "GroupDescription": "Wide open security group",
+        "VpcId": {"Ref": "XFFDemoVPC"},
+         "Tags": [{"Key": "Name","Value": "Lab External SG"}],
+        "SecurityGroupIngress" : [
+          {
+            "IpProtocol": "-1",
+            "CidrIp": "0.0.0.0/0"
+          }
+        ],
+        "SecurityGroupEgress" : [
+          {
+            "IpProtocol": "-1",
+            "CidrIp": "0.0.0.0/0"
+          }
+          ]
+      },
+       "DependsOn": [ "XFFDemoVPC" ]
+    },
+    "PublicLoadBalancerSecurityGroup" : {
+      "Type" : "AWS::EC2::SecurityGroup",
+      "Properties" : {
+        "GroupDescription" : "Public ELB Security Group with HTTP access on port 80 from the internet",
+        "VpcId" : { "Ref" : "XFFDemoVPC" },
+        "Tags": [ { "Key": "Name", "Value": "Lab Loadbalancer External SG"} ],
+        "SecurityGroupIngress" : [ { "IpProtocol" : "tcp", "FromPort" : "80", "ToPort" : "80", "CidrIp" : "0.0.0.0/0"} ],
+        "SecurityGroupEgress" : [ { "IpProtocol" : "tcp", "FromPort" : "80", "ToPort" : "80", "CidrIp" : "0.0.0.0/0"} ]
+      },
+      "DependsOn": [ "XFFDemoVPC" ]
+    },
+    
+
+    "acl1": {
+      "Type": "AWS::EC2::NetworkAclEntry",
+      "Properties": {
+        "CidrBlock": "0.0.0.0/0",
+        "Egress": "true",
+        "Protocol": "-1",
+        "RuleAction": "allow",
+        "RuleNumber": "100",
+        "NetworkAclId": {
+          "Ref": "WebSvrACL"
+        }
+      }
+    },
+
+    "acl2": {
+      "Type": "AWS::EC2::NetworkAclEntry",
+      "Properties": {
+        "CidrBlock": "0.0.0.0/0",
+        "Protocol": "-1",
+        "RuleAction": "allow",
+        "RuleNumber": "100",
+        "NetworkAclId": {
+          "Ref": "WebSvrACL"
+        }
+      }
+    },
+
+    "subnetacl1": {
+      "Type": "AWS::EC2::SubnetNetworkAclAssociation",
+      "Properties": {
+        "NetworkAclId": {"Ref": "WebSvrACL"},
+        "SubnetId": {"Ref": "XFFDemoDBSubnetA"}
+      }
+    },
+    "subnetacl2": {
+      "Type": "AWS::EC2::SubnetNetworkAclAssociation",
+      "Properties": {
+        "NetworkAclId": {"Ref": "WebSvrACL"},
+        "SubnetId": {"Ref": "XFFDemoPublicSubnet"}
+      }
+    },
+    "subnetacl3": {
+      "Type": "AWS::EC2::SubnetNetworkAclAssociation",
+      "Properties": {
+        "NetworkAclId": {"Ref": "WebSvrACL"},
+        "SubnetId": {"Ref": "XFFDemoWebSubnetA"}
+      }
+    },
+
+    "gw1": {
+      "Type": "AWS::EC2::VPCGatewayAttachment",
+      "Properties": {
+        "VpcId": {"Ref": "XFFDemoVPC"},
+        "InternetGatewayId": {"Ref": "InternetGW"}
+      },
+      "DependsOn": [ "XFFDemoVPC"]
+    },
+
+    "subnetroute2": {
+      "Type": "AWS::EC2::SubnetRouteTableAssociation",
+      "Properties": {
+        "RouteTableId": {"Ref": "rtbdefpubsub"},
+        "SubnetId": {"Ref": "XFFDemoPublicSubnet"}
+      }
+    },
+
+    "route1": {
+      "Type": "AWS::EC2::Route",
+      "Properties": {
+        "DestinationCidrBlock": "0.0.0.0/0",
+        "RouteTableId": {"Ref": "rtbdefroute"},
+        "GatewayId": {"Ref": "InternetGW"}
+      },
+      "DependsOn": "gw1"
+    },
+
+    "route2": {
+      "Type": "AWS::EC2::Route",
+      "Properties": {
+        "DestinationCidrBlock": "0.0.0.0/0",
+        "RouteTableId": {"Ref": "rtbdefpubsub"},
+        "GatewayId": {"Ref": "InternetGW"}
+      },
+      "DependsOn": "gw1"
+    },
+
+    "dchpassoc1": {
+      "Type": "AWS::EC2::VPCDHCPOptionsAssociation",
+      "Properties": {
+        "VpcId": {"Ref": "XFFDemoVPC"},
+        "DhcpOptionsId": {"Ref": "dopt21c7d043"}
+      }
+    },
+
+    "FWInstance": {
+      "Type": "AWS::EC2::Instance",
+      "Properties": {
+        "DisableApiTermination": "false",
+        "IamInstanceProfile": {"Ref": "BootstrapInstanceProfile"},
+        "InstanceInitiatedShutdownBehavior": "stop",
+        "EbsOptimized": "true",
+        "ImageId": { "Fn::FindInMap" : [ "PANFWRegionMap", { "Ref" : "AWS::Region" }, "AMI" ] },
+        "InstanceType": "m4.xlarge",
+        "BlockDeviceMappings" :
+        [
+            {
+              "DeviceName" : "/dev/xvda",
+              "Ebs" :
+              {
+                "VolumeType" : "gp2",
+                "DeleteOnTermination" : "true",
+                "VolumeSize" : "60"
+              }
+            }
+        ],
+        "KeyName":  { "Ref" : "ServerKeyName" },
+        "Monitoring": "false",
+        "Tags": [{ "Key": "Name", "Value": "WP VM-Series Firewall" }],
+        "NetworkInterfaces": [
+          {
+            "NetworkInterfaceId": { "Ref": "FWManagementNetworkInterface"},
+            "DeviceIndex": 0
+          },
+          {
+            "NetworkInterfaceId": { "Ref": "FWPublicNetworkInterface"},
+            "DeviceIndex": 1
+          },
+          {
+            "NetworkInterfaceId": { "Ref": "FWPrivate12NetworkInterface"},
+            "DeviceIndex": 2
+          },
+          {
+            "NetworkInterfaceId": { "Ref": "FWPrivate13NetworkInterface"},
+            "DeviceIndex": 3
+          }
+        ],
+        "UserData":  { "Fn::Base64" : { "Fn::Join" : ["", [
+            "vmseries-bootstrap-aws-s3bucket=",  { "Ref" : "BootstrapBucketName" }
+        ]]}}
+      },
+      "DependsOn": [  "FWManagementNetworkInterface", "FWPublicNetworkInterface", "FWPrivate12NetworkInterface", "FWPrivate13NetworkInterface", "XFFDemoPublicSubnet" ]
+    },
+
+    "WPDBServerInstance": {
+      "Type": "AWS::EC2::Instance",
+      "Properties": {
+        "DisableApiTermination": "false",
+        "InstanceInitiatedShutdownBehavior": "stop",
+        "ImageId": { "Fn::FindInMap" : [ "UbuntuRegionMap", { "Ref" : "AWS::Region" }, "AMI" ] },
+        "InstanceType": "t2.micro",
+        "KeyName": { "Ref": "ServerKeyName" },
+        "Monitoring": "false",
+        "Tags": [{ "Key": "Name", "Value": "WP DB Server 1" }],
+        "NetworkInterfaces": [
+          {
+            "DeleteOnTermination": "true",
+            "Description": "Primary network interface",
+            "DeviceIndex": 0,
+            "SubnetId": {
+              "Ref": "XFFDemoDBSubnetA"
+            },
+            "PrivateIpAddresses": [
+              {
+                "PrivateIpAddress": "10.0.2.101",
+                "Primary": "true"
+              }
+            ],
+            "GroupSet": [
+              {
+                "Ref": "sgWideOpen"
+              }
+            ]
+          }
+        ],
+        "UserData" : { "Fn::Base64" : { "Fn::Join" : ["", [
+            "#! /bin/bash\n",
+
+            "exec > >(tee /var/log/user-data.log|logger -t user-data -s 2>/dev/console) 2>&1\n",
+            "echo \"export new_routers='",{"Fn::GetAtt" : [ "FWPrivate13NetworkInterface", "PrimaryPrivateIpAddress" ]},"'\" >> /etc/dhcp/dhclient-enter-hooks.d/aws-default-route\n",
+            "ifdown eth0\n",
+            "ifup eth0\n",
+            "while true\n",
+            " do\n",
+            "  resp=$(curl -s -S -g --insecure \"https://",{"Ref": "ManagementElasticIP"},"/api/?type=op&cmd=<show><chassis-ready></chassis-ready></show>&key=LUFRPT1ETWtoUHduU0R5S0JpY0tvdktnQUFXNWlXR0k9TTlmMkhSMktNM25uM3hscXNnUXV3Zz09\")\n",
+            "  if [[ $resp == *\"[CDATA[yes\"* ]] ; then\n",
+            "    break\n",
+            "  fi\n",
+            " sleep 10s\n",
+            "done\n",
+            "sudo apt-get update\n",
+            "sudo apt-get -y install debconf-utils\n",
+            "echo \"mysql-server mysql-server/root_password password paloalto@123\" | sudo debconf-set-selections\n",
+            "echo \"mysql-server mysql-server/root_password_again password paloalto@123\" | sudo debconf-set-selections\n",
+            "DEBIAN_FRONTEND=noninteractive apt-get install -y mysql-server\n",
+            "mysql -uroot -ppaloalto@123 -e \"DELETE FROM mysql.user WHERE User='root' AND Host NOT IN ('localhost', '127.0.0.1', '::1');\"\n",
+            "mysql -uroot -ppaloalto@123 -e \"DELETE FROM mysql.user WHERE User='';\"\n",
+            "mysql -uroot -ppaloalto@123 -e \"DELETE FROM mysql.db WHERE Db='test' OR Db='test\\_localhost';\"\n",
+            "mysql -uroot -ppaloalto@123 -e \"FLUSH PRIVILEGES;\"\n",
+            "sudo sed -i \"s/.*bind-address.*/bind-address = 0.0.0.0/\" /etc/mysql/mysql.conf.d/mysqld.cnf\n",
+            "sudo systemctl restart mysql\n",
+            "mysql -uroot -ppaloalto@123 -e \"CREATE DATABASE Demo;\"\n",
+            "mysql -uroot -ppaloalto@123 -e \"CREATE USER 'demouser'@'%' IDENTIFIED BY 'paloalto@123';\"\n",
+            "mysql -uroot -ppaloalto@123 -e \"GRANT ALL PRIVILEGES ON Demo.* TO 'demouser'@'%';\"\n",
+            "mysql -uroot -ppaloalto@123 -e \"FLUSH PRIVILEGES;\"\n"
+        ]]}
+      }},
+      "DependsOn": [ "XFFDemoDBSubnetA", "sgWideOpen", "FWInstance"]
+    },
+    "WPWebInstance": {
+      "Type": "AWS::EC2::Instance",
+      "Properties": {
+        "DisableApiTermination": "false",
+        "InstanceInitiatedShutdownBehavior": "stop",
+        "ImageId": { "Fn::FindInMap" : [ "UbuntuRegionMap", { "Ref" : "AWS::Region" }, "AMI" ] },
+        "InstanceType": "t2.micro",
+        "KeyName": { "Ref": "ServerKeyName" },
+        "Monitoring": "false",
+        "Tags": [{"Key": "Name","Value": "WP Web Server 1"}],
+        "NetworkInterfaces": [
+          {
+            "DeleteOnTermination": "true",
+            "Description": "Primary network interface",
+            "DeviceIndex": 0,
+            "SubnetId": {
+              "Ref": "XFFDemoWebSubnetA"
+            },
+            "PrivateIpAddresses": [
+              {
+                "PrivateIpAddress": "10.0.1.101",
+                "Primary": "true"
+              }
+            ],
+            "GroupSet": [
+              {
+                "Ref": "sgWideOpen"
+              }
+            ]
+          }
+        ],
+        "UserData" : { "Fn::Base64" : { "Fn::Join" : ["", [
+            "#! /bin/bash\n",
+
+            "exec > >(tee /var/log/user-data.log|logger -t user-data -s 2>/dev/console) 2>&1\n",
+            "echo \"export new_routers='",{"Fn::GetAtt" : [ "FWPrivate12NetworkInterface", "PrimaryPrivateIpAddress" ]},"'\" >> /etc/dhcp/dhclient-enter-hooks.d/aws-default-route\n",
+            "ifdown eth0\n",
+            "ifup eth0\n",
+
+            "while true\n",
+            "  do\n",
+            "   resp=$(curl -s -S -g --insecure \"https://",{"Ref": "ManagementElasticIP"},"/api/?type=op&cmd=<show><chassis-ready></chassis-ready></show>&key=LUFRPT1ETWtoUHduU0R5S0JpY0tvdktnQUFXNWlXR0k9TTlmMkhSMktNM25uM3hscXNnUXV3Zz09\")\n",
+            "   if [[ $resp == *\"[CDATA[yes\"* ]] ; then\n",
+            "     break\n",
+            "   fi\n",
+            "  sleep 10s\n",
+            "done\n",
+            "apt-get update\n",
+            "apt-get install -y  unzip apache2 php libapache2-mod-php php-mysql php-pear php-gd\n",
+            "wget https://github.com/ethicalhack3r/DVWA/archive/master.zip -P /var/www/html/\n",
+            "cd /var/www/html/\n",
+            "unzip /var/www/html/master.zip -d /var/www/html/\n",
+            "cp /var/www/html/DVWA-master/config/config.inc.php.dist  /var/www/html/DVWA-master/config/config.inc.php\n",
+            "sed -i \"s/allow_url_include = Off/allow_url_include = On/g\" /etc/php/7.0/apache2/php.ini\n",
+            "sed -i \"s/p@ssw0rd/panadmin/g\" /var/www/html/DVWA-master/config/config.inc.php\n",
+            "sed -i \"s/avatar varchar(70)/avatar varchar(100)/g\" /var/www/html/DVWA-master/dvwa/includes/DBMS/MySQL.php\n",
+            "mv /var/www/html/DVWA-master /var/www/html/dvwa\n",
+            "chmod 777 /var/www/html/dvwa\n",
+            "chmod 777 /var/www/html/dvwa/hackable/uploads/\n",
+            "chmod 777 /var/www/html/dvwa/external/phpids/0.6/lib/IDS/tmp/phpids_log.txt\n",
+            "sudo apt-get -y install debconf-utils\n",
+            "echo \"mysql-server mysql-server/root_password password panadmin\" | sudo debconf-set-selections\n",
+            "echo \"mysql-server mysql-server/root_password_again password panadmin\" | sudo debconf-set-selections\n",
+            "export DEBIAN_FRONTEND=noninteractive\n",
+            "DEBIAN_FRONTEND=noninteractive\n",
+            "apt-get install -y -q mysql-server\n",
+            "mysql -uroot -ppanadmin -e \"CREATE DATABASE dvwa;\"\n",
+
+            "apt-get install -y apache2 wordpress\n",
+            "ln -sf /usr/share/wordpress /var/www/html/wordpress\n",
+            "gzip -d /usr/share/doc/wordpress/examples/setup-mysql.gz\n",
+            "while true\n",
+            " do\n",
+            "  resp=$(mysql -udemouser -ppaloalto@123 -h ",{"Fn::GetAtt" : [ "WPDBServerInstance", "PrivateIp" ]}," -e 'show databases')\n",
+            "  if [[ $resp == *\"Demo\"* ]]; then\n",
+            "     break\n",
+            "  fi\n",
+            " sleep 5s\n",
+            "done\n",
+
+            "bash /usr/share/doc/wordpress/examples/setup-mysql -n Demo -t ",{"Fn::GetAtt" : [ "WPDBServerInstance", "PrivateIp" ]}," ",{"Fn::GetAtt" : [ "WPDBServerInstance", "PrivateIp" ]},"\n",
+            "sed -i \"s/define('DB_USER'.*/define('DB_USER', 'demouser');/g\" /etc/wordpress/config-",{"Fn::GetAtt" : [ "WPDBServerInstance", "PrivateIp" ]},".php\n",
+            "sed -i \"s/define('DB_PASSWORD'.*/define('DB_PASSWORD', 'paloalto@123');/g\" /etc/wordpress/config-",{"Fn::GetAtt" : [ "WPDBServerInstance", "PrivateIp" ]},".php\n",
+            "mv /etc/wordpress/config-",{"Fn::GetAtt" : [ "WPDBServerInstance", "PrivateIp" ]},".php /etc/wordpress/config-",{ "Ref": "PublicElasticIP" },".php\n",
+            "wget -O /usr/lib/cgi-bin/guess-sql-root-password.cgi https://raw.githubusercontent.com/PaloAltoNetworks/aws/master/two-tier%20sample/guess-sql-root-password.cgi\n",
+            "chmod +x /usr/lib/cgi-bin/guess-sql-root-password.cgi\n",
+            "sed -i \"s/DB-IP-ADDRESS/",{"Fn::GetAtt" : [ "WPDBServerInstance", "PrivateIp" ]},"/g\" /usr/lib/cgi-bin/guess-sql-root-password.cgi\n",
+            "wget -O /usr/lib/cgi-bin/ssh-to-db.cgi https://raw.githubusercontent.com/PaloAltoNetworks/aws/master/two-tier%20sample/ssh-to-db.cgi\n",
+            "chmod +x /usr/lib/cgi-bin/ssh-to-db.cgi\n",
+            "sed -i \"s/DB-IP-ADDRESS/",{"Fn::GetAtt" : [ "WPDBServerInstance", "PrivateIp" ]},"/g\" /usr/lib/cgi-bin/ssh-to-db.cgi\n",
+            "wget -O /var/www/html/sql-attack.html https://raw.githubusercontent.com/PaloAltoNetworks/aws/master/two-tier%20sample/sql-attack.html\n",
+            "ln -sf /etc/apache2/conf-available/serve-cgi-bin.conf /etc/apache2/conf-enabled/serve-cgi-bin.conf\n",
+            "ln -sf /etc/apache2/mods-available/cgi.load /etc/apache2/mods-enabled/cgi.load\n",
+                        
+            
+            
+           "systemctl restart apache2\n"
+          ]]}
+        }
+        },
+        "DependsOn": [ "XFFDemoWebSubnetA", "sgWideOpen", "PublicElasticIP", "FWInstance" ]
+    },
+    "PublicElasticLoadBalancer" : {
+      "Type" : "AWS::ElasticLoadBalancingV2::LoadBalancer",
+      "Properties" : {    
+          "Name" : "XffALB",
+          "Scheme": "internet-facing",
+          "SecurityGroups" : [{"Ref": "sgWideOpen"}],
+          "Subnets" : [{"Ref": "XFFDemoPublicSubnet"}, {"Ref" : "XFFDemoWebSubnetB"}],
+          "Type": "application",
+          "IpAddressType": "ipv4"
+      },
+      "DependsOn": [ "XFFDemoPublicSubnet","XFFDemoWebSubnetB", "sgWideOpen", "PublicElasticIP", "FWInstance","XFFDemoVPC", "gw1", "sgWideOpen" ]
+    },
+    "TargetFWPort80" :{
+      "Type" : "AWS::ElasticLoadBalancingV2::TargetGroup",
+      "Properties" : {
+          "HealthCheckPath" : "/",
+          "HealthCheckPort" : "80",
+          "HealthCheckProtocol" : "HTTP",
+          "Port": 80,
+          "Protocol": "HTTP",
+          "Targets" : [ { "Id": "10.0.0.100", "Port": 80 }],
+          "TargetType" : "ip",
+          "VpcId" : {"Ref": "XFFDemoVPC"}
+      },
+      "DependsOn": [ "XFFDemoVPC", "FWPublicNetworkInterface"]
+    },
+    "ALBListener80" : {
+      "Type" : "AWS::ElasticLoadBalancingV2::Listener",
+      "Properties" : {
+          "DefaultActions" : [
+                      {
+                          "TargetGroupArn": {"Ref": "TargetFWPort80"},
+                          "Type": "forward"
+                      }
+                  ],
+          "LoadBalancerArn" : {"Ref": "PublicElasticLoadBalancer"},
+          "Port" : 80,
+          "Protocol" : "HTTP"
+      },
+      "DependsOn": [ "TargetFWPort80", "PublicElasticLoadBalancer", "XFFDemoVPC"]
+    },
+
+    "ALBListener443" : {
+      "Type" : "AWS::ElasticLoadBalancingV2::Listener",
+      "Properties" : {
+          "Certificates" : [ {
+      "CertificateArn" : {"Ref": "CertificateARN"}
+      }],
+      "DefaultActions" : [  {
+                          "TargetGroupArn": {"Ref": "TargetFWPort80"},
+                          "Type": "forward"
+                      } ],
+          "LoadBalancerArn" : {"Ref": "PublicElasticLoadBalancer"},
+          "Port" : 443,
+          "Protocol" : "HTTPS"
+      }
+    },
+    
+
+
+    "dynamodbxff" : {
+        "Type" : "AWS::DynamoDB::Table",
+        "Properties" : {
+        "AttributeDefinitions" : [
+            {
+            "AttributeName" : "username",
+            "AttributeType" : "S"   
+          }
+        ],
+        "KeySchema" : [
+          {
+            "AttributeName" : "username",
+            "KeyType" : "HASH"
+          }
+        ],
+        "ProvisionedThroughput" : {
+          "ReadCapacityUnits" : "5",
+          "WriteCapacityUnits" : "5"
+        },
+        "TableName" : "xffdbtable"
+        }
+    },
+    "xffHeaderApi": {
+      "Type": "AWS::ApiGateway::RestApi",
+      "Properties": {
+        "Name": "XFF API",
+        "Description": "API used for xffheader requests",
+        "FailOnWarnings" : true
+      }
+    },
+    "GetXFFHeaderPermission": {
+      "Type": "AWS::Lambda::Permission",
+      "Properties": {
+        "Action": "lambda:invokeFunction",
+        "FunctionName": {"Fn::GetAtt": ["GetXFFHeaderLambda", "Arn"]},
+        "Principal": "apigateway.amazonaws.com",
+        "SourceArn": {"Fn::Join": ["", 
+          ["arn:aws:execute-api:", {"Ref": "AWS::Region"}, ":", {"Ref": "AWS::AccountId"}, ":", {"Ref": "xffHeaderApi"}, "/*"]
+        ]}
+      }
+    },
+    "ApiGatewayCloudWatchLogsRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [{
+            "Effect": "Allow",
+            "Principal": { "Service": ["apigateway.amazonaws.com"] },
+            "Action": ["sts:AssumeRole"]
+          }]
+        },
+        "Policies": [{
+          "PolicyName": "ApiGatewayLogsPolicy",
+          "PolicyDocument": {
+            "Version": "2012-10-17",
+            "Statement": [{
+              "Effect": "Allow",
+              "Action": [
+                "logs:CreateLogGroup",
+                "logs:CreateLogStream",
+                "logs:DescribeLogGroups",
+                "logs:DescribeLogStreams",
+                "logs:PutLogEvents",
+                "logs:GetLogEvents",
+                "logs:FilterLogEvents"
+              ],
+              "Resource": "*"
+            }]
+          }
+        }]
+      }
+    },
+    "ApiGatewayAccount": {
+      "Type" : "AWS::ApiGateway::Account",
+      "Properties" : {
+        "CloudWatchRoleArn" : {"Fn::GetAtt" : ["ApiGatewayCloudWatchLogsRole", "Arn"] }
+      },
+      "DependsOn": [ "ApiGatewayCloudWatchLogsRole"]
+    },
+  "ApiDeployment": {
+    "Type": "AWS::ApiGateway::Deployment",
+    "DependsOn": ["xffHeaderApi","xffheaderRequest"],
+    "Properties": {
+      "RestApiId": {"Ref": "xffHeaderApi"},
+      "StageName": "DummyStage"
+    }
+  },
+
+    "xffheaderResource": {
+      "Type": "AWS::ApiGateway::Resource",
+      "DependsOn": ["xffHeaderApi"],
+      "Properties": {
+        "RestApiId": {"Ref": "xffHeaderApi"},
+        "ParentId": {"Fn::GetAtt": ["xffHeaderApi", "RootResourceId"]},
+        "PathPart": "xffheaders"
+      }
+    },
+
+    "xffHeaderApiStage": {
+      "DependsOn" : ["ApiDeployment"],
+      "Type": "AWS::ApiGateway::Stage",
+      "Properties": {
+        "DeploymentId": {"Ref": "ApiDeployment"},
+        "MethodSettings": [{
+          "DataTraceEnabled": true,
+          "HttpMethod": "*",
+          "LoggingLevel": "INFO",
+          "ResourcePath": "/*"
+        }],
+        "RestApiId": {"Ref": "xffHeaderApi"},
+        "StageName": "LATEST"
+      }
+    },
+
+    "xffheaderRequest": {
+      "DependsOn": ["GetXFFHeaderPermission","xffheaderResource","xffHeaderApi"],
+      "Type": "AWS::ApiGateway::Method",
+      "Properties": {
+        "AuthorizationType": "NONE",
+        "HttpMethod": "POST",
+        "Integration": {
+          "Type": "AWS",
+          "IntegrationHttpMethod": "POST",
+          "Uri": {"Fn::Join" : ["", 
+            ["arn:aws:apigateway:", {"Ref": "AWS::Region"}, ":lambda:path/2015-03-31/functions/", {"Fn::GetAtt": ["GetXFFHeaderLambda", "Arn"]}, "/invocations"]
+          ]},
+          "IntegrationResponses": [{
+            "StatusCode": 200
+          }]
+          
+        },
+        "RequestParameters": {},
+        "ResourceId": {"Ref": "xffheaderResource"},
+        "RestApiId": {"Ref": "xffHeaderApi"},
+        "MethodResponses": [{
+          "StatusCode": 200
+        }]
+      }
+    }
+
+},
+"Outputs": {
+    "FirewallManagementURL": {
+        "Description": "VM-Series management interface URL",
+        "Value": { "Fn::Join" : ["", [
+        "https://", { "Ref": "ManagementElasticIP"} ]]}
+        },
+    "WebServerURL": {
+            "Description": "Web Server URL",
+            "Value": { "Fn::Join" : ["", ["https://",{ "Fn::GetAtt" : [ "PublicElasticLoadBalancer" , "DNSName" ] },"/dvwa/setup.php"]]}
+        }
+
+  }
+}
+
+ 
+    
+  
